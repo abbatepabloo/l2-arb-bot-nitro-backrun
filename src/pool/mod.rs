@@ -96,16 +96,53 @@ impl LiquidityPool {
         amount_in: U256,
         zero_for_one: bool, // true: sell token0, false: sell token1
     ) -> crate::error::Result<(U256, U256, U256)> {
-        // INJECT: V2 constant-product math here.
-        // Reference: UniswapV2Library.getAmountOut (Solidity):
-        //   uint amountInWithFee = amountIn * (10000 - fee_bps);
-        //   uint numerator       = amountInWithFee * reserveOut;
-        //   uint denominator     = reserveIn * 10000 + amountInWithFee;
-        //   amountOut            = numerator / denominator;
-        //
-        // Note: Rust U256 arithmetic never panics on overflow/underflow;
-        //       use checked_* variants and propagate BotError::Overflow.
-        unimplemented!("V2 AMM swap simulation")
+        use crate::error::BotError;
+
+        let fee_bps = U256::from(self.fee_tier); // e.g. 3000 for 0.30%; Camelot stores total combined bps
+        let ten_k   = U256::from(10_000u32);
+
+        let (reserve_in, reserve_out) = if zero_for_one {
+            (self.reserve0, self.reserve1)
+        } else {
+            (self.reserve1, self.reserve0)
+        };
+
+        if reserve_in.is_zero() || reserve_out.is_zero() {
+            return Err(BotError::Overflow);
+        }
+
+        // UniswapV2Library.getAmountOut:
+        //   amountInWithFee = amountIn * (10000 - feeBps)
+        //   amountOut = (amountInWithFee * reserveOut) / (reserveIn * 10000 + amountInWithFee)
+        let fee_complement     = ten_k.checked_sub(fee_bps).ok_or(BotError::Overflow)?;
+        let amount_in_with_fee = amount_in.checked_mul(fee_complement).ok_or(BotError::Overflow)?;
+
+        let numerator   = amount_in_with_fee.checked_mul(reserve_out).ok_or(BotError::Overflow)?;
+        let denominator = reserve_in
+            .checked_mul(ten_k)
+            .ok_or(BotError::Overflow)?
+            .checked_add(amount_in_with_fee)
+            .ok_or(BotError::Overflow)?;
+
+        let amount_out = numerator / denominator;
+
+        if amount_out >= reserve_out {
+            return Err(BotError::Overflow);
+        }
+
+        let (new_reserve0, new_reserve1) = if zero_for_one {
+            (
+                self.reserve0.checked_add(amount_in).ok_or(BotError::Overflow)?,
+                self.reserve1 - amount_out, // safe: checked amount_out < reserve_out
+            )
+        } else {
+            (
+                self.reserve0 - amount_out,
+                self.reserve1.checked_add(amount_in).ok_or(BotError::Overflow)?,
+            )
+        };
+
+        Ok((amount_out, new_reserve0, new_reserve1))
     }
 
     /// Simulate a V3-style concentrated-liquidity swap (sqrt-price model).
@@ -128,14 +165,85 @@ impl LiquidityPool {
         zero_for_one: bool,
         sqrt_price_limit_x96: U256,
     ) -> crate::error::Result<(U256, U256, U256)> {
-        // INJECT: V3 full tick-crossing swap math here.
-        // Key formulas (fixed-point Q64.96 arithmetic):
-        //   Δsqrt_P = Δtoken1 / L            (when selling token1)
-        //   Δsqrt_P = L / Δtoken0 - L / sqrtP (when selling token0)
-        //
-        // For production: port UniV3 SwapMath.computeSwapStep() in Rust.
-        // The Uniswap v3 whitepaper §6.2 provides the full derivation.
-        unimplemented!("V3 AMM swap simulation")
+        use crate::error::BotError;
+
+        // reserve0 = sqrtPriceX96 (Q64.96), reserve1 = in-range liquidity (uint128)
+        let sqrt_price = self.reserve0;
+        let liquidity  = self.reserve1;
+
+        let q96 = U256::from(1u64) << 96;
+
+        if sqrt_price.is_zero() || liquidity.is_zero() {
+            return Err(BotError::Overflow);
+        }
+
+        if zero_for_one {
+            // Selling token0 → price falls.
+            //
+            // sqrtP_new = L * sqrtP / (L + amount_in * sqrtP / Q96)
+            // amount_out (token1) = L * (sqrtP - sqrtP_new) / Q96
+
+            let amount_in_scaled = amount_in
+                .checked_mul(sqrt_price)
+                .ok_or(BotError::Overflow)?
+                / q96;
+
+            let denom = liquidity.checked_add(amount_in_scaled).ok_or(BotError::Overflow)?;
+
+            let mut new_sqrt = liquidity
+                .checked_mul(sqrt_price)
+                .ok_or(BotError::Overflow)?
+                / denom;
+
+            if !sqrt_price_limit_x96.is_zero() && new_sqrt < sqrt_price_limit_x96 {
+                new_sqrt = sqrt_price_limit_x96;
+            }
+
+            if new_sqrt > sqrt_price {
+                return Err(BotError::Overflow);
+            }
+
+            let delta_sqrt = sqrt_price - new_sqrt;
+
+            // L * delta_sqrt may overflow U256 for extreme pool states; checked accordingly.
+            let amount_out = liquidity
+                .checked_mul(delta_sqrt)
+                .ok_or(BotError::Overflow)?
+                / q96;
+
+            Ok((amount_out, new_sqrt, liquidity))
+        } else {
+            // Selling token1 → price rises.
+            //
+            // sqrtP_new = sqrtP + amount_in * Q96 / L
+            // amount_out (token0) = L * Q96 * (sqrtP_new - sqrtP) / (sqrtP_new * sqrtP)
+            //                     = (L * Q96 / sqrtP) * delta_sqrt / sqrtP_new
+
+            let delta_sqrt = amount_in
+                .checked_mul(q96)
+                .ok_or(BotError::Overflow)?
+                / liquidity;
+
+            let mut new_sqrt = sqrt_price.checked_add(delta_sqrt).ok_or(BotError::Overflow)?;
+
+            if !sqrt_price_limit_x96.is_zero() && new_sqrt > sqrt_price_limit_x96 {
+                new_sqrt = sqrt_price_limit_x96;
+            }
+
+            let actual_delta = new_sqrt - sqrt_price;
+
+            // L * Q96 ≤ 2^224, fits in U256; divide by sqrtP before multiplying by
+            // actual_delta to keep the intermediate within 256 bits for typical pools.
+            let lq96       = liquidity.checked_mul(q96).ok_or(BotError::Overflow)?;
+            let amount_out = lq96
+                .checked_div(sqrt_price)
+                .ok_or(BotError::Overflow)?
+                .checked_mul(actual_delta)
+                .ok_or(BotError::Overflow)?
+                / new_sqrt;
+
+            Ok((amount_out, new_sqrt, liquidity))
+        }
     }
 }
 

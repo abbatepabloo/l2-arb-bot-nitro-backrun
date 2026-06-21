@@ -48,33 +48,50 @@ pub fn optimal_v2_v2(
     let u_fee_b = U256::from(fee_b);
 
     // ── Optimal input formula (analytical) ────────────────────────────────
-    // k = φ_a * φ_b * r_a_out * r_b_out
-    let k = u_fee_a
+    //
+    // Derived from d(profit)/dx = 0 for profit(x) = z(x) - x, where
+    //   y(x) = φ_a * x * r_a_out / (r_a_in*1000 + φ_a*x)     [leg A output]
+    //   z(y) = φ_b * y * r_b_out / (r_b_in*1000 + φ_b*y)     [leg B output]
+    //
+    // Setting dz/dx = 1 yields:
+    //   (r_a_in*r_b_in*1000^2 + φ_a*(r_b_in*1000 + φ_b*r_a_out)*x)^2
+    //       = φ_a*φ_b*r_a_out*r_b_out * r_a_in*r_b_in*1000^2
+    //
+    // Solving for x:
+    //   x_opt = 1000*(sqrt(φ_a*φ_b*r_a_out*r_b_out*r_a_in*r_b_in) - r_a_in*r_b_in*1000)
+    //           / (φ_a*(r_b_in*1000 + φ_b*r_a_out))
+
+    // k_expanded = φ_a * φ_b * r_a_out * r_b_out * r_a_in * r_b_in
+    let k_expanded = u_fee_a
         .checked_mul(u_fee_b).ok_or(BotError::Overflow)?
         .checked_mul(r_a_out).ok_or(BotError::Overflow)?
-        .checked_mul(r_b_out).ok_or(BotError::Overflow)?;
-
-    // k_expanded = k * r_a_in * r_b_in
-    let k_expanded = k
+        .checked_mul(r_b_out).ok_or(BotError::Overflow)?
         .checked_mul(r_a_in).ok_or(BotError::Overflow)?
         .checked_mul(r_b_in).ok_or(BotError::Overflow)?;
 
     let sqrt_term = isqrt(k_expanded);
-    
-    // sub_term = r_a_in * 1000 * 1000
+
+    // sub_term = r_a_in * r_b_in * 1000
     let sub_term = r_a_in
-        .checked_mul(U256::from(1000000u64)).ok_or(BotError::Overflow)?;
+        .checked_mul(r_b_in).ok_or(BotError::Overflow)?
+        .checked_mul(U256::from(1000u64)).ok_or(BotError::Overflow)?;
 
     // If sqrt_term <= sub_term, no arbitrage opportunity exists
     if sqrt_term <= sub_term {
         return Ok((U256::ZERO, U256::ZERO));
     }
 
-    let num = sqrt_term.checked_sub(sub_term).ok_or(BotError::Overflow)?;
-    
-    // den = φ_a * 1000 (adjusting for integer scale constraints)
-    let den = u_fee_a.checked_mul(U256::from(1000u64)).ok_or(BotError::Overflow)?;
-    
+    // num = 1000 * (sqrt_term - sub_term)
+    let num = U256::from(1000u64)
+        .checked_mul(sqrt_term - sub_term).ok_or(BotError::Overflow)?;
+
+    // den = φ_a * (r_b_in*1000 + φ_b*r_a_out)
+    let den = u_fee_a.checked_mul(
+        r_b_in.checked_mul(U256::from(1000u64)).ok_or(BotError::Overflow)?
+            .checked_add(u_fee_b.checked_mul(r_a_out).ok_or(BotError::Overflow)?)
+            .ok_or(BotError::Overflow)?
+    ).ok_or(BotError::Overflow)?;
+
     let optimal_amount_in = num.checked_div(den).ok_or(BotError::Overflow)?;
 
     if optimal_amount_in.is_zero() {
@@ -305,18 +322,357 @@ pub fn estimate_gas_cost_wei(max_fee_per_gas: U256, gas_limit: u64) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::DexProtocol;
+    use alloy::primitives::Address;
+
+    // ── Pool constructor ──────────────────────────────────────────────────────
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 20])
+    }
+
+    // fee_tier encoding used by both pool/mod.rs and optimizer.rs:
+    //   fee_multiplier (out of 1000) = 1000 - fee_tier/10
+    //   fee_tier=30  → 997/1000 (0.3%)
+    //   fee_tier=10  → 999/1000 (0.1%)
+    //   fee_tier=100 → 990/1000 (1.0%)
+    fn make_pool(addr_byte: u8, t0: u8, t1: u8, r0: u128, r1: u128, fee_tier: u32) -> LiquidityPool {
+        LiquidityPool {
+            pool_address:         addr(addr_byte),
+            dex_name:             String::new(),
+            protocol:             DexProtocol::UniswapV2,
+            token0_address:       addr(t0),
+            token1_address:       addr(t1),
+            token0_decimals:      18,
+            token1_decimals:      18,
+            token0_symbol:        String::new(),
+            token1_symbol:        String::new(),
+            fee_tier,
+            tick_spacing:         0,
+            enabled:              true,
+            reserve0:             U256::from(r0),
+            reserve1:             U256::from(r1),
+            last_sequence_number: 0,
+            timestamp:            0,
+        }
+    }
+
+    // ── isqrt ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn isqrt_known_values() {
-        assert_eq!(isqrt(U256::from(0u64)),  U256::ZERO);
-        assert_eq!(isqrt(U256::from(1u64)),  U256::from(1u64));
-        assert_eq!(isqrt(U256::from(4u64)),  U256::from(2u64));
-        assert_eq!(isqrt(U256::from(9u64)),  U256::from(3u64));
-        assert_eq!(isqrt(U256::from(10u64)), U256::from(3u64));
-        
-        let n = U256::from(1_000_000_000_000_000_000u128); 
+    fn isqrt_small_values() {
+        assert_eq!(isqrt(U256::ZERO),          U256::ZERO);
+        assert_eq!(isqrt(U256::from(1u64)),    U256::from(1u64));
+        assert_eq!(isqrt(U256::from(4u64)),    U256::from(2u64));
+        assert_eq!(isqrt(U256::from(9u64)),    U256::from(3u64));
+        assert_eq!(isqrt(U256::from(10u64)),   U256::from(3u64));
+        assert_eq!(isqrt(U256::from(100u64)),  U256::from(10u64));
+    }
+
+    #[test]
+    fn isqrt_floor_invariant() {
+        let n = U256::from(1_000_000_000_000_000_000u128);
         let s = isqrt(n);
         assert!(s * s <= n);
         assert!((s + U256::from(1u64)) * (s + U256::from(1u64)) > n);
+    }
+
+    // ── optimal_v2_v2 — profitable ────────────────────────────────────────────
+
+    // zero_for_one_a=true:
+    //   Leg A: sell token0 (r_a_in=r0), receive token1 (r_a_out=r1)
+    //   Leg B: sell token1 (r_b_in=r1), receive token0 (r_b_out=r0)
+    // Profitable when token1 is cheap on A and expensive on B.
+
+    #[test]
+    fn v2_v2_profitable_basic() {
+        // Pool A has abundant token1 (cheap), Pool B is balanced.
+        // Manual check: sqrt(997*997 * 2000*1000 * 500*1000) ≈ 997e6, sub=500e6 → profit.
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 500, 2000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert!(opt_in  > U256::ZERO, "should find a positive input");
+        assert!(exp_out > opt_in,     "expected_out must exceed optimal_in for profit");
+    }
+
+    #[test]
+    fn v2_v2_profitable_large_imbalance() {
+        // 5× imbalance across two pools → higher absolute profit
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 1000, 5000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 5000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert!(opt_in  > U256::ZERO);
+        assert!(exp_out > opt_in);
+    }
+
+    #[test]
+    fn v2_v2_profitable_reverse_direction() {
+        // zero_for_one_a=false: sell token1 on A, receive token0, sell on B.
+        // Pool A: r0=2000 (abundant token0), r1=500 → token0 cheap on A.
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 2000, 500, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, false).unwrap();
+
+        assert!(opt_in  > U256::ZERO);
+        assert!(exp_out > opt_in);
+    }
+
+    #[test]
+    fn v2_v2_overflow_on_huge_reserves() {
+        // k_expanded = φ²·r_a_out·r_b_out·r_a_in·r_b_in overflows U256 for
+        // reserves at 18-decimal scale (product ≫ 2^256).
+        let e18 = 1_000_000_000_000_000_000u128;
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 500_000 * e18, 2_000_000 * e18, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1_000_000 * e18, 1_000_000 * e18, 30);
+
+        let result = optimal_v2_v2(&pool_a, &pool_b, true);
+        assert!(result.is_err(), "should return Overflow for 18-decimal pool reserves");
+    }
+
+    #[test]
+    fn v2_v2_profitable_large_reserves() {
+        // Reserves large enough to show realistic profit without overflowing k_expanded.
+        // Safe upper bound: each reserve ≤ ~1e8 so r^4 ≤ 1e32 ≪ U256_max (≈1.16e77).
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 50_000_000, 200_000_000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 100_000_000, 100_000_000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert!(opt_in  > U256::ZERO);
+        assert!(exp_out > opt_in);
+        assert!(opt_in  < U256::from(50_000_000u64 / 2), "optimal input should be a fraction of r_a_in");
+    }
+
+    // ── optimal_v2_v2 — no profit ─────────────────────────────────────────────
+
+    #[test]
+    fn v2_v2_no_profit_balanced_pools() {
+        // Same price on both pools → fees destroy any apparent spread.
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 1000, 1000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert_eq!(opt_in,  U256::ZERO, "balanced pools: no opportunity expected");
+        assert_eq!(exp_out, U256::ZERO);
+    }
+
+    #[test]
+    fn v2_v2_no_profit_wrong_direction() {
+        // Imbalance exists but we try the unprofitable leg.
+        // Pool A: r0=500, r1=2000 → token1 cheap; wrong dir (false) = sell token1 on A.
+        // With dir=false: r_a_in=2000, r_a_out=500 → sub_term=2000e6 >> sqrt_term → no profit.
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 500, 2000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, false).unwrap();
+
+        assert_eq!(opt_in,  U256::ZERO, "wrong direction must not produce profit");
+        assert_eq!(exp_out, U256::ZERO);
+    }
+
+    #[test]
+    fn v2_v2_no_profit_zero_reserves() {
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 0, 2000, 30);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1000, 1000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert_eq!(opt_in,  U256::ZERO, "empty reserve must return zero");
+        assert_eq!(exp_out, U256::ZERO);
+    }
+
+    // ── optimal_v2_v2 — fee sensitivity ──────────────────────────────────────
+
+    #[test]
+    fn v2_v2_lower_fee_yields_more_profit() {
+        // Use larger reserves so integer rounding doesn't mask the fee difference.
+        let pool_a_hi = make_pool(0x01, 0xAA, 0xBB, 500_000, 2_000_000, 30); // 0.3%
+        let pool_b_hi = make_pool(0x02, 0xAA, 0xBB, 1_000_000, 1_000_000, 30);
+
+        let pool_a_lo = make_pool(0x03, 0xAA, 0xBB, 500_000, 2_000_000, 10); // 0.1%
+        let pool_b_lo = make_pool(0x04, 0xAA, 0xBB, 1_000_000, 1_000_000, 10);
+
+        let (_, out_hi) = optimal_v2_v2(&pool_a_hi, &pool_b_hi, true).unwrap();
+        let (_, out_lo) = optimal_v2_v2(&pool_a_lo, &pool_b_lo, true).unwrap();
+
+        assert!(out_lo > out_hi, "lower fee should yield more output: lo={out_lo} hi={out_hi}");
+    }
+
+    #[test]
+    fn v2_v2_mixed_fees_still_profitable() {
+        // Pool A low fee (0.1%), Pool B higher fee (0.3%), large imbalance.
+        let pool_a = make_pool(0x01, 0xAA, 0xBB, 500_000, 2_000_000, 10);
+        let pool_b = make_pool(0x02, 0xAA, 0xBB, 1_000_000, 1_000_000, 30);
+
+        let (opt_in, exp_out) = optimal_v2_v2(&pool_a, &pool_b, true).unwrap();
+
+        assert!(opt_in  > U256::ZERO, "should still find opportunity");
+        assert!(exp_out > opt_in);
+    }
+
+    #[test]
+    fn v2_v2_high_fee_kills_marginal_opportunity() {
+        // Tiny ~1% imbalance — profitable at low fee, unprofitable at 1% fee.
+        let pool_a_lo = make_pool(0x01, 0xAA, 0xBB, 990_000, 1_000_000, 10);
+        let pool_b_lo = make_pool(0x02, 0xAA, 0xBB, 1_000_000, 990_000, 10);
+
+        let pool_a_hi = make_pool(0x03, 0xAA, 0xBB, 990_000, 1_000_000, 100);
+        let pool_b_hi = make_pool(0x04, 0xAA, 0xBB, 1_000_000, 990_000, 100);
+
+        let (_, out_lo) = optimal_v2_v2(&pool_a_lo, &pool_b_lo, true).unwrap();
+        let (_, out_hi) = optimal_v2_v2(&pool_a_hi, &pool_b_hi, true).unwrap();
+
+        assert!(out_hi <= out_lo, "high fee must not outperform low fee: hi={out_hi} lo={out_lo}");
+    }
+
+    // ── optimal_triangular ────────────────────────────────────────────────────
+
+    // Pool directions: dir[i]=true → sell token0 on pool_i, get token1.
+    // Cycle: pool1 out feeds pool2 in; pool2 out feeds pool3 in; pool3 out = final amount.
+
+    #[test]
+    fn triangular_profitable_cycle() {
+        // Pool1: r0=100k, r1=150k → rate 1.5 (before fees).
+        // Pool2, Pool3: balanced 1:1.
+        // No-fee product = 1.5 × 1 × 1 = 1.5 > 1 → profitable after 3×0.3% fee.
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 100_000, 150_000, 30);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [true, true, true]).unwrap();
+
+        assert!(opt_in  > U256::ZERO, "ternary search should find an input");
+        assert!(exp_out > opt_in,     "exp_out={exp_out} must exceed opt_in={opt_in}");
+    }
+
+    #[test]
+    fn triangular_profitable_larger_rate() {
+        // Larger imbalance in pool1: 1:3 rate → more robust profit.
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 100_000, 300_000, 30);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [true, true, true]).unwrap();
+
+        assert!(opt_in  > U256::ZERO);
+        assert!(exp_out > opt_in);
+    }
+
+    #[test]
+    fn triangular_no_profit_balanced() {
+        // All pools at 1:1 → 3× fee overhead eliminates any apparent spread.
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 100_000, 100_000, 30);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [true, true, true]).unwrap();
+
+        if opt_in > U256::ZERO {
+            assert!(exp_out <= opt_in + U256::from(1u64),
+                "balanced pools: exp_out={exp_out} should not exceed opt_in={opt_in}");
+        } else {
+            assert_eq!(exp_out, U256::ZERO);
+        }
+    }
+
+    #[test]
+    fn triangular_no_profit_wrong_direction() {
+        // Imbalance in pool1 favours dir=true, but we flip pool1 to dir=false.
+        // Reversed leg: rate = 100k/150k ≈ 0.67 → product < 1 → no profit.
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 100_000, 150_000, 30);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [false, true, true]).unwrap();
+
+        if opt_in > U256::ZERO {
+            assert!(exp_out <= opt_in + U256::from(1u64),
+                "wrong direction must not produce profit: exp_out={exp_out} opt_in={opt_in}");
+        }
+    }
+
+    #[test]
+    fn triangular_zero_pool_reserve_returns_zero() {
+        // Pool1 has empty r0 → ternary search high = 0 → returns (0, 0).
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 0, 150_000, 30);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [true, true, true]).unwrap();
+
+        assert_eq!(opt_in,  U256::ZERO);
+        assert_eq!(exp_out, U256::ZERO);
+    }
+
+    #[test]
+    fn triangular_mixed_fees_still_profitable() {
+        // Pool1: 0.1% fee (lower barrier), pool2/3: 0.3%. Large imbalance.
+        let pool1 = make_pool(0x01, 0xAA, 0xBB, 100_000, 150_000, 10);
+        let pool2 = make_pool(0x02, 0xBB, 0xCC, 100_000, 100_000, 30);
+        let pool3 = make_pool(0x03, 0xCC, 0xAA, 100_000, 100_000, 30);
+
+        let (opt_in, exp_out) =
+            optimal_triangular(&pool1, &pool2, &pool3, [true, true, true]).unwrap();
+
+        assert!(opt_in  > U256::ZERO);
+        assert!(exp_out > opt_in);
+    }
+
+    #[test]
+    fn triangular_lower_total_fee_yields_more_profit() {
+        // Large reserves so integer rounding doesn't erase the fee difference.
+        // With 1e7-scale pools the per-swap fee delta (2 units per 1000) is visible.
+        let pool1_hi = make_pool(0x01, 0xAA, 0xBB, 10_000_000, 15_000_000, 30);
+        let pool2_hi = make_pool(0x02, 0xBB, 0xCC, 10_000_000, 10_000_000, 30);
+        let pool3_hi = make_pool(0x03, 0xCC, 0xAA, 10_000_000, 10_000_000, 30);
+
+        let pool1_lo = make_pool(0x04, 0xAA, 0xBB, 10_000_000, 15_000_000, 10);
+        let pool2_lo = make_pool(0x05, 0xBB, 0xCC, 10_000_000, 10_000_000, 10);
+        let pool3_lo = make_pool(0x06, 0xCC, 0xAA, 10_000_000, 10_000_000, 10);
+
+        let (_, out_hi) = optimal_triangular(&pool1_hi, &pool2_hi, &pool3_hi, [true, true, true]).unwrap();
+        let (_, out_lo) = optimal_triangular(&pool1_lo, &pool2_lo, &pool3_lo, [true, true, true]).unwrap();
+
+        assert!(out_lo > out_hi, "lower total fee should yield more: lo={out_lo} hi={out_hi}");
+    }
+
+    // ── estimate_gas_cost_wei ─────────────────────────────────────────────────
+
+    #[test]
+    fn gas_cost_is_positive() {
+        let cost = estimate_gas_cost_wei(U256::from(10_000_000_000u64), 350_000);
+        assert!(cost > 0);
+    }
+
+    #[test]
+    fn gas_cost_scales_with_gas_price() {
+        let lo = estimate_gas_cost_wei(U256::from(1_000_000_000u64),  350_000);
+        let hi = estimate_gas_cost_wei(U256::from(10_000_000_000u64), 350_000);
+        assert!(hi > lo, "10× gas price must yield higher cost: hi={hi} lo={lo}");
+    }
+
+    #[test]
+    fn gas_cost_scales_with_gas_limit() {
+        let lo = estimate_gas_cost_wei(U256::from(5_000_000_000u64), 200_000);
+        let hi = estimate_gas_cost_wei(U256::from(5_000_000_000u64), 400_000);
+        assert!(hi > lo, "2× gas limit must yield higher cost: hi={hi} lo={lo}");
+    }
+
+    #[test]
+    fn gas_cost_includes_l1_surcharge() {
+        // Even at zero gas price, L1 surcharge makes cost > 0.
+        let cost = estimate_gas_cost_wei(U256::ZERO, 0);
+        assert!(cost > 0, "L1 surcharge must be non-zero even with zero gas price and limit");
     }
 }

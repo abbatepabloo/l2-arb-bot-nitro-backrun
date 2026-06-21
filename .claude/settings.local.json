@@ -12,7 +12,8 @@
       "Bash(grep -rn \"fn saturating_to\\\\|pub fn to<\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ruint-1.12.5/src/\" 2>/dev/null | head -10)",
       "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ruint-1.12.5/**)",
       "Bash(find \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/\" -name \"*.rs\" -path \"*/ruint*\" | head -5 *)",
-      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)"
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)",
+      "PowerShell(cargo test 2>&1)"
     ]
   }
 }
