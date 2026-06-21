@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"pub gas_price\\\\|pub max_fee\\\\|pub gas_limit\\\\|pub input\\\\|pub to\\\\|pub value\\\\|pub nonce\\\\|pub chain_id\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-consensus-2.1.0/src/transaction/eip1559.rs\" | head -20)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-consensus-2.1.0/src/transaction/**)",
+      "Bash(grep -n \"fn abi_decode_returns\\\\|fn abi_decode\\\\b\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-sol-types-1.6.0/src/types/function.rs\" | head -20)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-sol-types-1.6.0/src/types/**)",
+      "Bash(grep -n \"Uint<24\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-sol-types-1.6.0/src/types/function.rs\" 2>/dev/null | head -5 *)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-primitives-1.6.0/src/uint/**)",
+      "Bash(grep -rn \"fn saturating_to\\\\|fn to<\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-primitives-1.6.0/src/\" | head -10)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-primitives-1.6.0/src/**)",
+      "Bash(grep -rn \"fn saturating_to\\\\|pub fn to<\" \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ruint-1.12.5/src/\" 2>/dev/null | head -10)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ruint-1.12.5/**)",
+      "Bash(find \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/\" -name \"*.rs\" -path \"*/ruint*\" | head -5 *)",
+      "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)"
+    ]
+  }
+}

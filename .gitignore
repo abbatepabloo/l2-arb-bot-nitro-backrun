@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock (keep for binaries, ignore for libraries — adjust as needed)
+# Cargo.lock
+
+# Environment and secrets
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store

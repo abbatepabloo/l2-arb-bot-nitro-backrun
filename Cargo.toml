@@ -1,0 +1,79 @@
+[package]
+name = "nitro-backrun"
+version = "0.1.0"
+edition = "2021"
+description = "High-frequency MEV backrun bot for Arbitrum Nitro (L2)"
+
+# ── Optimized release profile ─────────────────────────────────────────────────
+[profile.release]
+opt-level     = 3
+lto           = "fat"       # Link-time optimisation across crates
+codegen-units = 1           # Single codegen unit → better inlining
+panic         = "abort"     # Removes unwinding overhead
+strip         = "symbols"
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+[dependencies]
+
+# --- Async runtime ------------------------------------------------------------
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "signal",
+] }
+
+# --- EVM & Alloy ecosystem ----------------------------------------------------
+# Single meta-crate; "full" enables all sub-crates including:
+#   alloy-primitives, alloy-consensus, alloy-provider, alloy-sol-types,
+#   alloy-rpc-types, alloy-signer, alloy-network, alloy-transport-*
+alloy = { version = "2.1", features = [
+    "full",
+    "rpc-types-eth",
+    "provider-http",
+    "signer-local",
+    "consensus",
+    "sol-types",
+    "rlp",
+    "signers",
+] }
+
+# --- WebSocket client for the Arbitrum Sequencer Feed ------------------------
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util       = "0.3"
+
+# --- Serialization ------------------------------------------------------------
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] } # fast slicing
+
+# --- Base64 decoding for l2Msg field -----------------------------------------
+base64 = "0.22"
+
+# --- Database (SQLite via blocking API; called only at startup) ---------------
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# --- Error handling -----------------------------------------------------------
+thiserror = "1"
+anyhow    = "1"
+
+# --- Logging / tracing --------------------------------------------------------
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# --- Concurrent data structures -----------------------------------------------
+dashmap     = "6"   # lock-free concurrent HashMap (read-heavy workloads)
+parking_lot = "0.12"
+
+# --- Low-level byte manipulation ----------------------------------------------
+bytes = "1"
+
+# --- Configuration from .env -------------------------------------------------
+dotenvy = "0.15"
+
+# --- Hex utilities -----------------------------------------------------------
+const-hex = "1"     # zero-alloc const-compatible hex enc/dec
+
+# --- HTTP client (for eth_sendRawTransactionConditional RPC) ----------------
+reqwest = { version = "0.12", features = ["json"] }
