@@ -41,9 +41,54 @@ pub struct BotConfig {
     /// DEX router addresses to monitor on the sequencer feed.
     /// Any transaction whose `to` field does not match this set is ignored.
     pub monitored_routers: Vec<Address>,
+
+    // ── Chain ─────────────────────────────────────────────────────────────────
+    /// EIP-155 chain ID used when signing execution transactions.
+    /// Arbitrum One = 42161, Arbitrum Sepolia = 421614, Anvil default = 31337.
+    pub chain_id: u64,
 }
 
 impl BotConfig {
+    /// Construct directly from values — used in integration tests to inject
+    /// mock/local URLs without relying on environment variables.
+    ///
+    /// ```rust,ignore
+    /// let config = BotConfig::new(
+    ///     "http://localhost:8545",
+    ///     "ws://localhost:8546/feed",
+    ///     "http://localhost:8545",
+    ///     "deadbeefdeadbeef...",   // 32-byte hex private key
+    ///     Address::ZERO,           // executor contract (mock)
+    ///     ":memory:",              // SQLite in-memory
+    ///     0,                       // min_profit_wei
+    ///     vec![],                  // monitored_routers
+    /// );
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        rpc_url:                   impl Into<String>,
+        sequencer_feed_url:        impl Into<String>,
+        direct_sequencer_rpc_url:  impl Into<String>,
+        private_key_hex:           impl Into<String>,
+        executor_contract_address: Address,
+        db_path:                   impl Into<String>,
+        min_profit_wei:            u128,
+        monitored_routers:         Vec<Address>,
+        chain_id:                  u64,
+    ) -> Self {
+        Self {
+            rpc_url:                  rpc_url.into(),
+            sequencer_feed_url:       sequencer_feed_url.into(),
+            direct_sequencer_rpc_url: direct_sequencer_rpc_url.into(),
+            private_key_hex:          private_key_hex.into(),
+            executor_contract_address,
+            db_path:                  db_path.into(),
+            min_profit_wei,
+            monitored_routers,
+            chain_id,
+        }
+    }
+
     /// Load from environment variables (reads `.env` via `dotenvy` first).
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok(); // gracefully ignore missing .env
@@ -70,6 +115,10 @@ impl BotConfig {
                 .parse()
                 .map_err(|e: std::num::ParseIntError| BotError::Config(e.to_string()))?,
             monitored_routers,
+            chain_id: std::env::var("CHAIN_ID")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(42161), // Arbitrum One default
         })
     }
 }

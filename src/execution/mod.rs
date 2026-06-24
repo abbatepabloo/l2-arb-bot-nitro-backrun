@@ -127,11 +127,7 @@ impl ExecutionManager {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // ── 3. Build EIP-1559 transaction ─────────────────────────────────
-        //
-        // Chain ID for Arbitrum One mainnet: 42161
-        // Chain ID for Arbitrum Sepolia:      421614
-        // INJECT: Read chain_id from BotConfig.
-        let chain_id: u64 = 42161;
+        let chain_id: u64 = self.config.chain_id;
 
         // TxEip1559 gas fields are u128 in alloy 2.x (not U256).
         let mut tx = TxEip1559 {

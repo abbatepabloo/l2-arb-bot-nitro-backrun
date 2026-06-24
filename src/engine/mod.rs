@@ -51,11 +51,18 @@ impl ArbitrageEngine {
     /// Step 4: Spawn live evaluation loop.
     ///
     /// Returns once the engine is in live mode and the evaluation loop is running.
+    /// `max_transactions`: if `Some(n)`, the live evaluation loop exits after
+    /// processing `n` transactions. If `None` (production default), the loop
+    /// runs indefinitely until the feed channel closes.
+    ///
+    /// Returns a `JoinHandle` for the live loop so the caller can `await` it
+    /// in test mode to know when the requested number of transactions is done.
     pub async fn bootstrap(
         config: Arc<BotConfig>,
         lpm: Arc<LiquidityPoolManager>,
         exec_tx: mpsc::Sender<ArbitrageSignal>,
-    ) -> Result<()> {
+        max_transactions: Option<usize>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
         info!("ArbitrageEngine: starting bootstrap sequence");
 
         // ── Step 1: Open WebSocket feed → buffer everything ────────────────
@@ -152,9 +159,9 @@ impl ArbitrageEngine {
             token_graph,
             exec_tx,
         };
-        tokio::spawn(engine.run_live(feed_rx));
+        let handle = tokio::spawn(engine.run_live(feed_rx, max_transactions));
 
-        Ok(())
+        Ok(handle)
     }
 
     // ── Live Evaluation Loop ───────────────────────────────────────────────────
@@ -165,8 +172,14 @@ impl ArbitrageEngine {
     /// Target latency: < 10 µs per arbitrable transaction.
     /// Non-arbitrable transactions are pre-filtered by the feed parser and
     /// never reach this function.
-    async fn run_live(self, mut feed_rx: mpsc::Receiver<SequencerFeedTransaction>) {
+    async fn run_live(
+        self,
+        mut feed_rx: mpsc::Receiver<SequencerFeedTransaction>,
+        max_transactions: Option<usize>,
+    ) {
         info!("ArbitrageEngine live evaluation loop started");
+
+        let mut count = 0usize;
 
         while let Some(seq_tx) = feed_rx.recv().await {
             // Only arbitrable transactions reach the engine — the feed parser
@@ -174,6 +187,14 @@ impl ArbitrageEngine {
             if let Err(e) = self.evaluate(seq_tx).await {
                 // Log but never panic in the hot loop.
                 debug!("Evaluation skipped: {e}");
+            }
+
+            count += 1;
+            if let Some(max) = max_transactions {
+                if count >= max {
+                    info!(count, "Reached max_transactions limit — evaluation loop exiting");
+                    return;
+                }
             }
         }
 

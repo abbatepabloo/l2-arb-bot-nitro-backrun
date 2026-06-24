@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "High-frequency MEV backrun bot for Arbitrum Nitro (L2)"
 
+[lib]
+name    = "nitro_backrun"
+path    = "src/lib.rs"
+
 # ── Optimized release profile ─────────────────────────────────────────────────
 [profile.release]
 opt-level     = 3
@@ -77,3 +81,7 @@ const-hex = "1"     # zero-alloc const-compatible hex enc/dec
 
 # --- HTTP client (for eth_sendRawTransactionConditional RPC) ----------------
 reqwest = { version = "0.12", features = ["json"] }
+
+# ── Dev dependencies (integration tests only) ─────────────────────────────────
+[dev-dependencies]
+tempfile = "3"

@@ -13,7 +13,8 @@
       "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ruint-1.12.5/**)",
       "Bash(find \"C:/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/\" -name \"*.rs\" -path \"*/ruint*\" | head -5 *)",
       "Read(//c/Users/abbat/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)",
-      "PowerShell(cargo test 2>&1)"
+      "PowerShell(cargo test 2>&1)",
+      "Bash(cargo check *)"
     ]
   }
 }
